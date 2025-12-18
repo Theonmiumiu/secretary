@@ -1,0 +1,6 @@
+{
+    datetime: "datetime_file_path",
+    "2025_12_15": "context_2025_12_15.json",
+    "2025_12_16": "context_2025_12_16.json",
+    "2025_12_17": "context_2025_12_17.json",
+}
