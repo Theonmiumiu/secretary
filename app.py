@@ -45,7 +45,9 @@ def get_review_content(secretary, date_now, days_delta):
     target_date = early_days_time_str(date_now, days_delta)
     dic = fetch_dic(target_date)
     if dic:
-        return secretary.schedule(dic2list(dic), '请告诉我，我现在完成了哪些任务？分点简要罗列，不要输出任何无关的废话')
+        tup_lst = dic2list(dic)
+        tup_lst.pop(1)
+        return secretary.schedule(tup_lst, '请告诉我，我现在完成了哪些任务？分点简要罗列，不要输出任何无关的废话')
     else:
         return "无记录"
 
@@ -156,8 +158,8 @@ def init_app_state():
                 reviews_parts = ["[复习提醒] : "]
                 for days, label in [(3, "三天前"), (7, "七天前"), (14, "十四天前"), (30, "一个月前")]:
                     content = get_review_content(secretary, date_now, days)
-                    reviews_parts.append(f"{label} : \n{content}")
-                reviews = "\n".join(reviews_parts)
+                    reviews_parts.append(f"{label} : \n\n{content}")
+                reviews = "\n\n\n".join(reviews_parts)
 
                 today_context_dic['user_prompt1'] = f'我们今天要按计划复习的内容是什么？'
                 today_context_dic['agent_reply1'] = reviews
@@ -294,7 +296,9 @@ if view_mode == "当前对话":
 
         # 【核心修改】后台逻辑：加上格式提醒的“紧箍咒”
         # 这段话会被存入字典和文件，也会发给 LLM，但刚才已经在界面上展示了简洁版
-        augmented_prompt = prompt + '\n回忆我们一开始对你的输出要求，严格按照[临期任务]、[学业任务]、[实习任务]、[习惯养成]、[聊天]五个部分回复。'
+        augmented_prompt = prompt
+        if any(i in prompt for i in ['日志', '计划', '日程', '安排', '规划', '任务']):
+            augmented_prompt = prompt + f'\n今天是{now_display.strftime("%Y-%m-%d")}回忆我们一开始对你的输出要求，严格按照[临期任务]、[学业任务]、[实习任务]、[习惯养成]、[聊天]五个部分回复。'
 
         st.session_state.today_context_dic[f'user_prompt{new_ind}'] = augmented_prompt
 

@@ -60,7 +60,9 @@ def get_review_content(secretary, date_now, days_delta):
     target_date = early_days_time_str(date_now, days_delta)
     dic = fetch_dic(target_date)
     if dic:
-        return secretary.schedule(dic2list(dic), '请告诉我，我现在完成了哪些任务？分点简要罗列，不要输出任何无关的废话')
+        tup_lst = dic2list(dic)
+        tup_lst.pop(1)
+        return secretary.schedule(tup_lst, '请告诉我，我现在完成了哪些任务？分点简要罗列，不要输出任何无关的废话')
     else:
         print(f'暂时没有{days_delta}天前的任务日程')
         return "无记录"
@@ -120,11 +122,12 @@ def processor():
         ind = 2
 
         user_prompt0 = f'今天是{date_string}，{weekday}，这是我们昨天的日程对话：\n{yesterday_lag}\n\n请整理一下，我们今天需要接着做的事情有哪些？整理成日程表'
+
         today_context_dic = {"user_prompt0": user_prompt0}
         agent_reply0 = secretary.schedule([], user_prompt0)
         today_context_dic['agent_reply0'] = agent_reply0
         with open(today_file_path, 'w', encoding='utf-8') as f:
-            json5.dump(today_context_dic, f, ensure_ascii = False)
+            json5.dump(today_context_dic, f, ensure_ascii = False, indect = 4)
         print(f'[进行中] : \n{agent_reply0}')
 
 
@@ -140,9 +143,9 @@ def processor():
 
         for days, label in review_periods:
             content = get_review_content(secretary, date_now, days)
-            reviews_parts.append(f"{label} : \n{content}")
+            reviews_parts.append(f"{label} : \n\n{content}")
 
-        reviews = "\n".join(reviews_parts) + "\n"
+        reviews = "\n\n".join(reviews_parts) + "\n\n"
         print(reviews)
 
         today_context_dic['user_prompt1'] = f'我们今天要按计划复习的内容是什么？'
@@ -164,7 +167,8 @@ def processor():
 
     while True:
         user_prompt = input(f'您的需求？')
-        user_prompt = user_prompt + '\n回忆我们一开始对你的输出要求，严格按照[临期任务]、[学业任务]、[实习任务]、[习惯养成]、[聊天]五个部分回复。'
+        if any(i in user_prompt for i in ['日志','计划','日程','安排','规划','任务']):
+            user_prompt = user_prompt + f'\n今天是{date_string}回忆我们一开始对你的输出要求，严格按照[临期任务]、[学业任务]、[实习任务]、[习惯养成]、[聊天]五个部分回复。'
         today_context_dic[f'user_prompt{ind}'] = user_prompt
         today_context_lst = dic2list(today_context_dic)
         agent_reply = secretary.schedule(today_context_lst, user_prompt)

@@ -6,7 +6,7 @@ import requests
 from requests import RequestException
 from src.get_env import config
 import time
-
+from openai import OpenAI
 
 class LLMTask:
     """
@@ -27,7 +27,69 @@ class LLMTask:
 
     def call_llm(self, system_prompt, user_prompt, context_pair):
         """
-        调用大模型
+        阿里云调用大模型
+        :param system_prompt: 系统提示词
+        :param user_prompt: 用户当前提示词
+        :param context_pair: 一个列表，其中为上下文，包含当前的用户提示词
+        :return: 大模型调用输出
+        """
+        try:
+            client = OpenAI(
+                # 若没有配置环境变量，请用阿里云百炼API Key将下行替换为：api_key="sk-xxx",
+                # 新加坡和北京地域的API Key不同。获取API Key：https://help.aliyun.com/zh/model-studio/get-api-key
+                api_key=self.api_key,
+                # 以下是北京地域base_url，如果使用新加坡地域的模型，需要将base_url替换为：https://dashscope-intl.aliyuncs.com/compatible-mode/v1
+                base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+            )
+
+            messages = [
+                {
+                    "role": "system",
+                    "content": system_prompt,
+                }
+            ]
+
+            # 如果提供了上下文，则加入上下文
+            if context_pair:
+                for i in range(len(context_pair)):
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": context_pair[i][0],
+                        }
+                    )
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": context_pair[i][1],
+                        }
+                    )
+
+            # 添加用户输入
+            messages.append({
+                "role": "user",
+                "content": user_prompt,
+            })
+
+            retry = 0
+            while retry<2:
+                try:
+                    completion = client.chat.completions.create(
+                        model="qwen-plus",  # 模型列表：https://help.aliyun.com/zh/model-studio/getting-started/models
+                        # 基本的系统提示词信息
+                        messages=messages
+                        )
+                    return completion.choices[0].message.content
+                except Exception as e:
+                    print(f"调用大模型时出现未知错误：\n{e}")
+                    retry += 1
+        except Exception as e:
+            print(f"错误信息：{e}")
+            print("请参考文档：https://help.aliyun.com/zh/model-studio/developer-reference/error-code")
+
+    def siliconflow_call_llm(self, system_prompt, user_prompt, context_pair):
+        """
+        硅基流动调用大模型
         :param system_prompt: 系统提示词
         :param user_prompt: 用户当前提示词
         :param context_pair: 一个列表，其中为上下文，包含当前的用户提示词
@@ -44,7 +106,7 @@ class LLMTask:
 
         # 如果提供了上下文，则加入上下文
         if context_pair:
-            for i in range(len(context_pair)-1):
+            for i in range(len(context_pair)):
                 messages.append(
                     {
                         "role": "user",

@@ -28,7 +28,7 @@ class Reporter(LLMTask):
         super().__init__()
         self.system_prompt = SYSTEM_PROMPT
 
-    def schedule(self, context):
+    def report(self, context):
         """
         生成日程安排
         :param context: 要总结的内容的上下文字符串
