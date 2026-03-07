@@ -1,193 +1,179 @@
 from pathlib import Path
 import datetime
-import json5
-from src.LLMs.secretary import Secretary
-from src.LLMs.reporter import Reporter
+import langchain_core.load
+from src.LLMs.models import base_model, get_former_logs, get_date_delta, get_time
+from langchain_openai import ChatOpenAI
+from src.LLMs.prompts import record_system_prompt, report_system_prompt, conclude_system_prompt
+from langchain_core.messages import SystemMessage, AIMessage, HumanMessage, ToolMessage
+import re
+from typing import List
 
 
-def dic2list(today_context_dic: dict):
-    """
-    方便把聊天上下文的dic转为list
-    :param today_context_dic: 聊天上下文的dic
-    :return: 聊天上下文的lst
-    """
-    today_context_lst = []
-    for i in range(int(len(today_context_dic) / 2)):
-        tup = (today_context_dic.get(f'user_prompt{i}', 'Warning : 没找到上下文'),
-               today_context_dic.get(f'agent_reply{i}', 'Warning : 没找到上下文'))
-        today_context_lst.append(tup)
-    return today_context_lst
+class Secretary:
+    def __init__(self,
+                 model: ChatOpenAI = base_model,
+                 model_with_tools: ChatOpenAI = base_model.bind_tools([get_former_logs, get_date_delta, get_time]),
+                 chat_logs_dir: Path = Path(__file__).parent / "src" / "chat_logs",
+                 weekly_reports_dir: Path = Path(__file__).parent / "src" / "weekly_reports"
+                 ):
+        self.now: datetime.datetime = datetime.datetime.now()
+        self.date = self._get_day()
+        self.weekday = self._get_weekday()
+        self.chat_logs_dir: Path = chat_logs_dir
+        self.weekly_reports_dir: Path = weekly_reports_dir
+        self.model = model
+        self.model_with_tools = model_with_tools
+        self.chat_logs_dir.mkdir(parents=True, exist_ok=True)
+        self.weekly_reports_dir.mkdir(parents=True, exist_ok=True)
+        self.valid_logs_dates_list = self._get_valid_logs_dates_list()
 
 
-def early_days_time_str(now, delta: int):
-    """
-    获得几天前的日期的字符串
-    :param now: 当天日期的datetime对象
-    :param delta: 几天前？
-    :return: 返回这一天的日期字符串
-    """
-    earlier_date = now - datetime.timedelta(delta)
-    earlier_date = earlier_date.strftime("%Y_%m_%d")
-    return earlier_date
+    def _get_day(self):
+        return self.now.date()
+
+    def _get_weekday(self):
+        weeks = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+        weekday = weeks[self.now.weekday()]
+        return weekday
+
+    def _early_days_time_str(self, delta: int):
+        """
+        获得几天前的日期的字符串
+        :param delta: 几天前？
+        :return: 返回这一天的日期字符串
+        """
+        earlier_date = self.date - datetime.timedelta(delta)
+        earlier_date = earlier_date.strftime("%Y_%m_%d")
+        return earlier_date
+
+    def _get_valid_logs_dates_list(self) -> list:
+        pattern = r"\b\d{4}_\d{2}_\d{2}\b"
+        file_date_list: List[datetime.datetime] = []
+        for file in self.chat_logs_dir.glob("*"):
+            matches = re.findall(pattern, file.stem)
+            if matches:
+                file_date_list.append(datetime.datetime.strptime(matches[0],"%Y_%m_%d").date())
+            else:
+                continue
+        return file_date_list
 
 
-def fetch_dic(date):
-    """
-    方便获得某一天的日程记录
-    :param date: 日期，格式按照"%Y_%m_%d"
-    :return: 日程记录的dic
-    """
-    logs_dir_path = Path(__file__).parent / 'src' / 'logs'
-    for file in logs_dir_path.rglob("*"):
-        if date in file.stem:
-            print(f'已找到{date}的日程记录')
-            file_path = logs_dir_path / f'context_{date}.json'
-            with open(file_path, 'r', encoding='utf-8') as f:
-                dic = json5.load(f)
-            return dic
-    print(f'未找到{date}的日程记录')
-    return {}
-
-
-def get_review_content(secretary, date_now, days_delta):
-    """
-    获取指定天数前的复习内容
-    :param secretary: Secretary 实例
-    :param date_now: 当前时间对象
-    :param days_delta: 回溯天数
-    :return: 复习内容的字符串（如果无记录则返回"无记录"）
-    """
-    target_date = early_days_time_str(date_now, days_delta)
-    dic = fetch_dic(target_date)
-    if dic:
-        tup_lst = dic2list(dic)
-        tup_lst.pop(1)
-        return secretary.schedule(tup_lst, '请告诉我，我现在完成了哪些任务？分点简要罗列，不要输出任何无关的废话')
-    else:
-        print(f'暂时没有{days_delta}天前的任务日程')
-        return "无记录"
-
-def weekly_report():
-    """
-    方便自动生成周报
-    :return: 生成周报文件
-    """
-    reporter = Reporter()
-    date_now = datetime.datetime.now()
-    date_string = date_now.strftime("%Y_%m_%d")
-    weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
-    weekday = weekdays[date_now.weekday()]
-
-    if weekday == '周一':
-        weekly_reports_dir_path = Path(__file__).parent / "src" / "weekly_reports"
-        if not any(date_string in file.stem for file in weekly_reports_dir_path.rglob('*')):
-            week_report_path = weekly_reports_dir_path / f"周报_{date_string}.txt"
-            last_week_days = [date_now - datetime.timedelta(i) for i in range(1,8)]
+    def weekly_report(self):
+        """
+        方便自动生成周报
+        :return: 生成周报文件
+        """
+        flag1 = self.weekday == '周一'
+        flag2 = not any(self.date.strftime('%Y_%m_%d') in file.stem for file in self.weekly_reports_dir.glob('*'))
+        if flag1 and flag2:
+            week_report_path = self.weekly_reports_dir / f"周报_{self.date.strftime('%Y_%m_%d')}.txt"
             last_week_days_logs = []
-            for i in last_week_days:
-                log_path = Path(__file__).parent / "src" / "logs" / f"context_{i.strftime('%Y_%m_%d')}.json"
-                if log_path.exists():
-                    with open(log_path, 'r', encoding='utf-8') as f:
-                        context = json5.load(f)
-                last_week_days_logs.append(str(context))
+            for i in range(1,8):
+                last_week_days_logs.append(get_former_logs.func(self.chat_logs_dir, self.date.strftime('%Y_%m_%d'), i))
             last_week_logs_context = '\n\n'.join(last_week_days_logs)
-            report = reporter.report(last_week_logs_context)
+            context_list = [
+                SystemMessage(report_system_prompt),
+                HumanMessage(last_week_logs_context)
+            ]
+            report = self.model.invoke(context_list)
             with open(week_report_path, 'w', encoding='utf-8') as f:
-                f.write(report)
+                f.write(report.content)
+            # 完整一点的话最好还要引入一下logger
             print(report)
 
 
-def processor():
-    secretary = Secretary()
-    # 说白了这只是个上下文管理系统而已
-    logs_dir_path = Path(__file__).parent / "src" / 'logs'
-    # 应该有一个json文件专门用来存放各个文件的日期，就是这个logs_time_dic了
-    logs_time_dic_path = logs_dir_path / "logs_time_dic.json"
-    with open(logs_time_dic_path, 'r', encoding='utf-8') as f:
-        logs_time_dic = json5.load(f, encoding='utf-8')
-
-    date_now = datetime.datetime.now()
-    date_string = date_now.strftime("%Y_%m_%d")
-    weeks = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
-    weekday = weeks[date_now.weekday()]
-
-    # 自动总结周报
-    weekly_report()
-
-    if date_string not in logs_time_dic.keys():
-        # 初始化
-        today_file_path = logs_dir_path / f"context_{date_string}.json"
-        yesterday_date = early_days_time_str(date_now, 1)
-        yesterday_lag = secretary.schedule(dic2list(fetch_dic(yesterday_date)), '请告诉我，我还没完成的任务有哪些？')
-        ind = 2
-
-        user_prompt0 = f'今天是{date_string}，{weekday}，这是我们昨天的日程对话：\n{yesterday_lag}\n\n请整理一下，我们今天需要接着做的事情有哪些？整理成日程表'
-
-        today_context_dic = {"user_prompt0": user_prompt0}
-        agent_reply0 = secretary.schedule([], user_prompt0)
-        today_context_dic['agent_reply0'] = agent_reply0
-        with open(today_file_path, 'w', encoding='utf-8') as f:
-            json5.dump(today_context_dic, f, ensure_ascii = False, indect = 4)
-        print(f'[进行中] : \n{agent_reply0}')
-
-
-        # 整理需要定期复习的内容
-        reviews_parts = ["[复习提醒] : "]
-        # 定义复习周期和对应的标签
-        review_periods = [
-            (3, "三天前"),
-            (7, "七天前"),
-            (14, "十四天前"),
-            (30, "一个月前")
-        ]
-
-        for days, label in review_periods:
-            content = get_review_content(secretary, date_now, days)
-            reviews_parts.append(f"{label} : \n\n{content}")
-
-        reviews = "\n\n".join(reviews_parts) + "\n\n"
-        print(reviews)
-
-        today_context_dic['user_prompt1'] = f'我们今天要按计划复习的内容是什么？'
-        today_context_dic['agent_reply1'] = reviews
-
-        logs_time_dic[date_string] = f"context_{date_string}.json"
-        with open(logs_time_dic_path, 'w', encoding='utf-8') as f:
-            json5.dump(logs_time_dic, f, ensure_ascii=False)
-
-    else:
-        today_file_path = logs_dir_path / logs_time_dic.get(date_string, '')
-        try:
-            with open(today_file_path, 'r', encoding='utf-8') as f:
-                today_context_dic = json5.load(f)
-            ind = int(len(today_context_dic) / 2)
-
-        except Exception as e:
-            print(f'读取当天上下文时出现未知错误：{e}')
-
-    while True:
-        user_prompt = input(f'您的需求？')
-        if any(i in user_prompt for i in ['日志','计划','日程','安排','规划','任务']):
-            user_prompt = user_prompt + f'\n今天是{date_string}回忆我们一开始对你的输出要求，严格按照[临期任务]、[学业任务]、[实习任务]、[习惯养成]、[聊天]五个部分回复。'
-        today_context_dic[f'user_prompt{ind}'] = user_prompt
-        today_context_lst = dic2list(today_context_dic)
-        agent_reply = secretary.schedule(today_context_lst, user_prompt)
-        today_context_dic[f'agent_reply{ind}'] = agent_reply
-        print(f"\n\n{agent_reply}\n\n")
-        with open(today_file_path, 'w', encoding='utf-8') as f:
-            json5.dump(today_context_dic, f, indent=4, ensure_ascii = False)
-        ind += 1
-        # 检查日期，是否应该新建log了
-        date_update = datetime.datetime.now().strftime("%Y_%m_%d")
-        if date_update != date_string:
-            print(f'今日已经结束，新的一天开始了')
+    def record(self):
+        """
+        记录每天的计划
+        :return:
+        """
+        if not self.date in self.valid_logs_dates_list:
+            # 初始化
+            today_file_path = self.chat_logs_dir / f"context_{self.date.strftime('%Y_%m_%d')}.json"
+            # 如果之前有任务记录，也就是不是第一次使用
+            if self.valid_logs_dates_list:
+                self.valid_logs_dates_list.sort()
+                latest_date = self.valid_logs_dates_list[-1]
+                latest_date_file_path = self.chat_logs_dir / f"context_{latest_date.strftime('%Y_%m_%d')}.json"
+                with open(latest_date_file_path, 'r', encoding='utf-8') as f:
+                    history_str = f.read()
+                yesterday_msg_list = langchain_core.load.loads(history_str)
+                yesterday_msg_list.reverse()
+                history = [SystemMessage(record_system_prompt)]
+                for msg in yesterday_msg_list:
+                    if isinstance(msg, AIMessage):
+                        instruction = f'今天是{self.date.strftime("%Y_%m_%d")}，{self.weekday}，我将提供给你<昨天的日程对话>，请整理一下，我们今天需要接着做的事情有哪些？整理成日程表'
+                        history += [HumanMessage(instruction), HumanMessage(f"<昨天的日程对话>\n{msg.content}\n</昨天的日程对话>)")]
+                        break
+                    else:
+                        continue
+            # 如果是第一次使用
+            else:
+                # 第一次
+                initial_instruction = "用户之前还没有跟你提起过他的任务，请询问他最近有什么计划，然后做好记录"
+                history = [SystemMessage(record_system_prompt), HumanMessage(initial_instruction)]
+            res = self.model.invoke(history)
+            history.append(res)
             with open(today_file_path, 'w', encoding='utf-8') as f:
-                json5.dump(today_context_dic, f, indent=4, ensure_ascii = False)
-            break
+                history_str = langchain_core.load.dumps(history,pretty=True)
+                f.write(history_str)
+            print(f'[进行中] : \n{res}')
 
+            print(f'[复习提醒] : \n')
+            for i in [3,7,14,30]:
+                former_log = get_former_logs.func(self.chat_logs_dir, self.date.strftime('%Y_%m_%d'), i)
+                context = [SystemMessage(conclude_system_prompt), HumanMessage(former_log)]
+                print(self.model.invoke(context).content)
+        else:
+            # 上下文简单地管理在json文件里
+            today_file_path = self.chat_logs_dir / f"context_{self.date.strftime('%Y_%m_%d')}.json"
+            try:
+                with open(today_file_path, 'r', encoding='utf-8') as f:
+                    history_str = f.read()
+                    history = langchain_core.load.loads(history_str)
+            except Exception as e:
+                print(f'读取当天上下文时出现未知错误：{e}')
+                history = [SystemMessage(record_system_prompt)]
+
+        while True:
+            user_prompt = input(f'您的需求？')
+            if any(i in user_prompt for i in ['日志','计划','日程','安排','规划','任务']):
+                user_prompt = user_prompt + f'\n今天是{self.date}，回忆我们一开始对你的输出要求，严格按照[临期任务]、[学业任务]、[实习任务]、[习惯养成]、[聊天]五个部分回复。'
+            history.append(HumanMessage(user_prompt))
+            agent_reply = self.model_with_tools.invoke(history)
+            history.append(agent_reply)
+            while agent_reply.tool_calls:
+                for call in agent_reply.tool_calls:
+                    call_id = call.get('id')
+                    call_name = call.get('name')
+                    call_args = call.get('args')
+                    if call_name == 'get_time':
+                        result = get_time.invoke(call_args)
+                    elif call_name == 'get_former_logs':
+                        call_args['chat_logs_dir'] = self.chat_logs_dir
+                        result = get_former_logs.invoke(call_args)
+                    elif call_name == 'get_date_delta':
+                        result = get_date_delta.invoke(call_args)
+                    else:
+                        result = f'未知工具调用'
+                    tool_msg = ToolMessage(content = str(result), tool_call_id = call_id)
+                    history.append(tool_msg)
+                agent_reply = self.model_with_tools.invoke(history)
+                history.append(agent_reply)
+            print(f"\n\n{agent_reply.content}\n\n")
+            with open(today_file_path, 'w', encoding='utf-8') as f:
+                history_str = langchain_core.load.dumps(history,pretty=True)
+                f.write(history_str)
+
+            # 检查日期，是否应该新建log了
+            date_update = datetime.datetime.now().date()
+            if date_update != self.date:
+                print(f'今日已经结束，新的一天开始了')
+                break
 
 def main():
-    processor()
+    secretary = Secretary()
+    secretary.record()
 
 
 if __name__ == '__main__':

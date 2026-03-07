@@ -13,5 +13,6 @@ class Config:
     TOP_P = float(os.getenv("TOP_P"))
     TOP_K = int(os.getenv("TOP_K"))
     FREQUENCY_PENALTY = float(os.getenv("FREQUENCY_PENALTY"))
+    MAX_RETRY = int(os.getenv("MAX_RETRY"))
 
 config = Config()

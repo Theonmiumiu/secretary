@@ -30,7 +30,7 @@ def early_days_time_str(now, delta: int):
 
 def fetch_dic(date):
     """查找指定日期的日志"""
-    logs_dir_path = Path(__file__).parent / 'src' / 'logs'
+    logs_dir_path = Path(__file__).parent / 'src' / 'chat_logs'
     if not logs_dir_path.exists():
         return {}
     for file in logs_dir_path.rglob("*"):
@@ -77,7 +77,7 @@ def check_and_generate_weekly_report():
 
                 for day in last_week_days:
                     day_str = day.strftime('%Y_%m_%d')
-                    log_path = Path(__file__).parent / "src" / "logs" / f"context_{day_str}.json"
+                    log_path = Path(__file__).parent / "src" / "chat_logs" / f"context_{day_str}.json"
 
                     if log_path.exists():
                         with open(log_path, 'r', encoding='utf-8') as f:
@@ -110,7 +110,7 @@ def init_app_state():
         st.session_state.secretary = Secretary()
 
     # 2. 路径准备
-    logs_dir_path = Path(__file__).parent / "src" / 'logs'
+    logs_dir_path = Path(__file__).parent / "src" / 'chat_logs'
     logs_dir_path.mkdir(parents=True, exist_ok=True)
     logs_time_dic_path = logs_dir_path / "logs_time_dic.json"
 
@@ -222,7 +222,7 @@ with st.sidebar:
 
     elif view_mode == "每日日志":
         st.subheader("📅 日志列表")
-        logs_dir = Path(__file__).parent / "src" / "logs"
+        logs_dir = Path(__file__).parent / "src" / "chat_logs"
         if logs_dir.exists():
             # 排除 logs_time_dic
             log_files = sorted(logs_dir.glob("context_*.json"), key=lambda f: f.stat().st_mtime, reverse=True)
