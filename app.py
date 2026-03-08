@@ -1,332 +1,248 @@
 import streamlit as st
 import datetime
-import json5
+import pandas as pd
 from pathlib import Path
-from src.LLMs.secretary import Secretary
-from src.LLMs.reporter import Reporter
+import langchain_core.load
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
 
+# ================= 导入核心类和工具 =================
+from main import Secretary
+from src.LLMs.models import (
+    get_former_logs, get_date_delta, get_time,
+    update_dashboard, add_dashboard, remove_dashboard,
+    stream_wrapper, _get_dashboard_df
+)
+from src.LLMs.prompts import record_system_prompt
 
-# ================= 1. 工具函数 (复用 main.py 逻辑) =================
-
-def dic2list(today_context_dic: dict):
-    """把字典转为元组列表，适配 LLM 接口"""
-    today_context_lst = []
-    # 按索引排序，确保对话顺序正确
-    indices = sorted(
-        [int(k.replace('user_prompt', '')) for k in today_context_dic.keys() if k.startswith('user_prompt')])
-    for i in indices:
-        u_key = f'user_prompt{i}'
-        a_key = f'agent_reply{i}'
-        if u_key in today_context_dic:
-            tup = (today_context_dic.get(u_key, ''), today_context_dic.get(a_key, ''))
-            today_context_lst.append(tup)
-    return today_context_lst
-
-
-def early_days_time_str(now, delta: int):
-    earlier_date = now - datetime.timedelta(delta)
-    return earlier_date.strftime("%Y_%m_%d")
-
-
-def fetch_dic(date):
-    """查找指定日期的日志"""
-    logs_dir_path = Path(__file__).parent / 'src' / 'chat_logs'
-    if not logs_dir_path.exists():
-        return {}
-    for file in logs_dir_path.rglob("*"):
-        if date in file.stem:
-            with open(file, 'r', encoding='utf-8') as f:
-                return json5.load(f)
-    return {}
-
-
-def get_review_content(secretary, date_now, days_delta):
-    """获取复习内容"""
-    target_date = early_days_time_str(date_now, days_delta)
-    dic = fetch_dic(target_date)
-    if dic:
-        tup_lst = dic2list(dic)
-        tup_lst.pop(1)
-        return secretary.schedule(tup_lst, '请告诉我，我现在完成了哪些任务？分点简要罗列，不要输出任何无关的废话')
-    else:
-        return "无记录"
-
-
-# ================= 2. 周报生成逻辑 =================
-
-def check_and_generate_weekly_report():
-    """检查是否是周一，如果是且未生成过，则生成周报"""
-    date_now = datetime.datetime.now()
-    weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
-    weekday = weekdays[date_now.weekday()]
-    date_string = date_now.strftime("%Y_%m_%d")
-
-    reports_dir = Path(__file__).parent / "src" / "weekly_reports"
-    reports_dir.mkdir(parents=True, exist_ok=True)
-
-    current_report_path = reports_dir / f"周报_{date_string}.txt"
-
-    # 逻辑：今天是周一 且 对应的文件还不存在
-    if weekday == '周一' and not current_report_path.exists():
-        with st.spinner('📊 检测到今天是周一，正在为您生成上周工作总结...'):
-            try:
-                reporter = Reporter()
-                # 获取过去7天 (1-7)
-                last_week_days = [date_now - datetime.timedelta(i) for i in range(1, 8)]
-                last_week_days_logs = []
-
-                for day in last_week_days:
-                    day_str = day.strftime('%Y_%m_%d')
-                    log_path = Path(__file__).parent / "src" / "chat_logs" / f"context_{day_str}.json"
-
-                    if log_path.exists():
-                        with open(log_path, 'r', encoding='utf-8') as f:
-                            context = json5.load(f)
-                        # 将字典转字符串存入列表
-                        last_week_days_logs.append(f"【日期: {day_str}】\n{json5.dumps(context, ensure_ascii=False)}")
-
-                if last_week_days_logs:
-                    full_context = '\n\n'.join(last_week_days_logs)
-                    report_content = reporter.report(full_context)
-
-                    with open(current_report_path, 'w', encoding='utf-8') as f:
-                        f.write(report_content)
-
-                    return report_content
-                else:
-                    return "上周无日志记录，跳过生成。"
-            except Exception as e:
-                st.error(f"周报生成失败: {e}")
-    return None
-
-
-# ================= 3. 核心初始化逻辑 =================
-
-def init_app_state():
-    """初始化应用状态，包含每日初始化和周报检查"""
-
-    # 1. 实例化 Secretary
-    if "secretary" not in st.session_state:
-        st.session_state.secretary = Secretary()
-
-    # 2. 路径准备
-    logs_dir_path = Path(__file__).parent / "src" / 'chat_logs'
-    logs_dir_path.mkdir(parents=True, exist_ok=True)
-    logs_time_dic_path = logs_dir_path / "logs_time_dic.json"
-
-    if not logs_time_dic_path.exists():
-        with open(logs_time_dic_path, 'w', encoding='utf-8') as f:
-            json5.dump({}, f)
-
-    with open(logs_time_dic_path, 'r', encoding='utf-8') as f:
-        logs_time_dic = json5.load(f, encoding='utf-8')
-
-    date_now = datetime.datetime.now()
-    date_string = date_now.strftime("%Y_%m_%d")
-
-    weeks = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
-    weekday = weeks[date_now.weekday()]
-
-    today_file_path = logs_dir_path / f"context_{date_string}.json"
-
-    # --- A. 周报检查 (独立于每日初始化) ---
-    new_report = check_and_generate_weekly_report()
-    if new_report:
-        st.session_state.new_weekly_report = new_report
-
-    # --- B. 每日初始化流程 ---
-    if date_string not in logs_time_dic.keys():
-        with st.spinner(f'🌞 {date_string} {weekday}！正在初始化日程...'):
-            try:
-                secretary = st.session_state.secretary
-
-                # 1. 昨天回顾
-                yesterday_date = early_days_time_str(date_now, 1)
-                yesterday_lag = secretary.schedule(dic2list(fetch_dic(yesterday_date)),
-                                                   '请告诉我，我还没完成的任务有哪些？')
-
-                user_prompt0 = f'今天是{date_string}，{weekday}，这是我们昨天的日程对话：\n\n\n{yesterday_lag}\n\n\n请整理一下，我们今天需要接着做的事情有哪些？整理成日程表'
-                agent_reply0 = secretary.schedule([], user_prompt0)
-
-                today_context_dic = {"user_prompt0": user_prompt0, "agent_reply0": agent_reply0}
-
-                # 临时保存
-                with open(today_file_path, 'w', encoding='utf-8') as f:
-                    json5.dump(today_context_dic, f, ensure_ascii=False, indent=4)
-
-                # 2. 历史复习
-                reviews_parts = ["[复习提醒] : "]
-                for days, label in [(3, "三天前"), (7, "七天前"), (14, "十四天前"), (30, "一个月前")]:
-                    content = get_review_content(secretary, date_now, days)
-                    reviews_parts.append(f"{label} : \n\n{content}")
-                reviews = "\n\n\n".join(reviews_parts)
-
-                today_context_dic['user_prompt1'] = f'我们今天要按计划复习的内容是什么？'
-                today_context_dic['agent_reply1'] = reviews
-
-                # 3. 事务提交
-                logs_time_dic[date_string] = f"context_{date_string}.json"
-
-                with open(logs_time_dic_path, 'w', encoding='utf-8') as f:
-                    json5.dump(logs_time_dic, f, ensure_ascii=False, indent=4)
-
-                with open(today_file_path, 'w', encoding='utf-8') as f:
-                    json5.dump(today_context_dic, f, ensure_ascii=False, indent=4)
-
-                st.session_state.today_context_dic = today_context_dic
-
-            except Exception as e:
-                st.error(f"初始化失败 (网络或API错误): {e}")
-                st.stop()
-
-    # --- C. 读取已有记录 ---
-    else:
-        filename = logs_time_dic.get(date_string, '')
-        today_file_path = logs_dir_path / filename
-        if today_file_path.exists():
-            with open(today_file_path, 'r', encoding='utf-8') as f:
-                st.session_state.today_context_dic = json5.load(f)
-        else:
-            st.session_state.today_context_dic = {}
-
-    st.session_state.today_file_path = today_file_path
-    st.session_state.date_string = date_string
-
-
-# ================= 4. 界面渲染 (UI) =================
+# 建立工具字典，方便调用
+tool_dic = {tool.name: tool for tool in
+            [get_former_logs, get_date_delta, get_time, update_dashboard, add_dashboard, remove_dashboard]}
 
 st.set_page_config(page_title="Theon's Secretary", page_icon="📝", layout="wide")
 
-# --- 侧边栏：历史档案 ---
+# ================= 1. 核心状态初始化 =================
+if "secretary" not in st.session_state:
+    st.session_state.secretary = Secretary()
+    # 每次启动应用时检查并生成周报（只有周一且未生成过才会真正执行）
+    st.session_state.secretary.weekly_report()
+
+sec = st.session_state.secretary
+date_str = sec.date.strftime('%Y_%m_%d')
+today_file_path = sec.chat_logs_dir / f"context_{date_str}.json"
+
+# 加载当天的历史记录到 session_state
+if "history" not in st.session_state:
+    if today_file_path.exists():
+        with open(today_file_path, 'r', encoding='utf-8') as f:
+            st.session_state.history = langchain_core.load.loads(f.read())
+    else:
+        # ======= 模拟 main.py 里的每日首次初始化 =======
+        with st.spinner(f"🌞 {date_str} {sec.weekday}！正在初始化今日工作..."):
+            df, _ = _get_dashboard_df()
+            df_md = df.to_markdown()
+
+            if sec.valid_dashboard_dates_list:
+                history = [SystemMessage(content=record_system_prompt)]
+                instruction = f'今天是{date_str}，{sec.weekday}，我们最近最新的任务计划面板是<dashboard>，'
+                history += [HumanMessage(content=instruction),
+                            HumanMessage(content=f"<dashboard>\n{df_md}\n</dashboard>")]
+            else:
+                initial_instruction = "用户之前还没有跟你提起过他的任务，因此没有<dashboard>，请询问他最近有什么计划，然后做好记录"
+                history = [SystemMessage(content=record_system_prompt), HumanMessage(content=initial_instruction)]
+
+            try:
+                res = stream_wrapper(sec.model, history)
+                history.append(res)
+                with open(today_file_path, 'w', encoding='utf-8') as f:
+                    f.write(langchain_core.load.dumps(history, pretty=True, ensure_ascii=False))
+                st.session_state.history = history
+            except Exception as e:
+                st.error(f"初始化失败: {e}")
+                st.stop()
+
+# ================= 2. 侧边栏：历史档案 =================
 with st.sidebar:
     st.header("🗄️ 档案室")
-
     view_mode = st.radio("选择查看内容:", ["当前对话", "往期周报", "每日日志"], index=0)
-
     selected_content = None
 
     if view_mode == "往期周报":
         st.subheader("📊 周报列表")
-        reports_dir = Path(__file__).parent / "src" / "weekly_reports"
-        if reports_dir.exists():
-            report_files = sorted(reports_dir.glob("周报_*.txt"), key=lambda f: f.stat().st_mtime, reverse=True)
+        if sec.weekly_reports_dir.exists():
+            report_files = sorted(sec.weekly_reports_dir.glob("周报_*.txt"), key=lambda f: f.stat().st_mtime,
+                                  reverse=True)
             if report_files:
-                selected_file = st.selectbox("选择周报日期", report_files, format_func=lambda x: x.stem)
+                selected_file = st.selectbox("选择周报", report_files, format_func=lambda x: x.stem)
                 if selected_file:
                     with open(selected_file, 'r', encoding='utf-8') as f:
                         selected_content = f.read()
             else:
-                st.info("暂无生成的周报")
-        else:
-            st.info("暂无周报目录")
+                st.info("暂无周报")
 
     elif view_mode == "每日日志":
         st.subheader("📅 日志列表")
-        logs_dir = Path(__file__).parent / "src" / "chat_logs"
-        if logs_dir.exists():
-            # 排除 logs_time_dic
-            log_files = sorted(logs_dir.glob("context_*.json"), key=lambda f: f.stat().st_mtime, reverse=True)
+        if sec.chat_logs_dir.exists():
+            log_files = sorted(sec.chat_logs_dir.glob("context_*.json"), key=lambda f: f.stat().st_mtime, reverse=True)
             if log_files:
-                selected_log = st.selectbox("选择日志日期", log_files,
-                                            format_func=lambda x: x.stem.replace('context_', ''))
+                selected_log = st.selectbox("选择日志", log_files, format_func=lambda x: x.stem.replace('context_', ''))
                 if selected_log:
                     with open(selected_log, 'r', encoding='utf-8') as f:
-                        log_data = json5.load(f)
-                        # 格式化展示
+                        log_data = langchain_core.load.loads(f.read())
                         formatted_log = ""
-                        indices = sorted(
-                            [int(k.replace('user_prompt', '')) for k in log_data.keys() if k.startswith('user_prompt')])
-                        for i in indices:
-                            u = log_data.get(f'user_prompt{i}')
-                            a = log_data.get(f'agent_reply{i}')
-                            if u: formatted_log += f"**User**: {u}\n\n"
-                            if a: formatted_log += f"**Secretary**: {a}\n\n---\n\n"
+                        for msg in log_data:
+                            if isinstance(msg, HumanMessage):
+                                content = msg.content.split('\n今天是')[0]
+                                formatted_log += f"**User**: {content}\n\n"
+                            elif isinstance(msg, AIMessage) and msg.content:
+                                formatted_log += f"**Secretary**: {msg.content}\n\n---\n\n"
                         selected_content = formatted_log
             else:
-                st.info("暂无日志文件")
+                st.info("暂无日志")
 
-# --- 主界面 ---
-
-now_display = datetime.datetime.now()
-weeks_display = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
-weekday_display = weeks_display[now_display.weekday()]
-
-st.title("📝 Theon's Secretary")
-st.caption(f"当前时间: {now_display.strftime('%Y-%m-%d')} {weekday_display}")
-
-# 新周报弹窗提示
-if "new_weekly_report" in st.session_state:
-    with st.expander("🎉 最新周报已生成！点击查看", expanded=True):
-        st.markdown(st.session_state.new_weekly_report)
-    del st.session_state.new_weekly_report
-
-# 内容展示区域
+# ================= 3. 核心界面布局 =================
 if view_mode == "当前对话":
-    # 确保初始化
-    if "today_context_dic" not in st.session_state:
-        init_app_state()
+    left_col, right_col = st.columns([0.65, 0.35], gap="large")
 
-    # 渲染聊天
-    if "today_context_dic" in st.session_state:
-        context = st.session_state.today_context_dic
-        indices = sorted([int(k.replace('user_prompt', '')) for k in context.keys() if k.startswith('user_prompt')])
+    # ---------------- 左侧栏：主聊天区 ----------------
+    with left_col:
+        st.title("📝 Theon's Secretary")
+        st.caption(f"当前时间: {date_str} {sec.weekday}")
 
-        chat_container = st.container()
-        with chat_container:
-            for i in indices:
-                u_p = context.get(f'user_prompt{i}')
-                a_r = context.get(f'agent_reply{i}')
-                if u_p:
-                    with st.chat_message("user"):
-                        st.markdown(u_p)
-                if a_r:
-                    with st.chat_message("assistant"):
-                        st.markdown(a_r)
+        # 1. 渲染聊天历史
+        for msg in st.session_state.history:
+            # 过滤不需要在 UI 显示的系统信息和工具调用信息
+            if isinstance(msg, SystemMessage):
+                continue
+            if isinstance(msg, ToolMessage):
+                with st.expander(f"🛠️ 工具执行完毕 (ID: {msg.tool_call_id[:6]}...)"):
+                    st.caption(msg.content)
+                continue
+            if isinstance(msg, AIMessage) and not msg.content:
+                continue  # 这是纯纯的工具调用指令头，不用展示
 
-    # 输入框
-    if prompt := st.chat_input("请输入任务..."):
-        # 界面显示：只显示你输入的原始内容，保持清爽
-        with st.chat_message("user"):
-            st.markdown(prompt)
+            role = "user" if isinstance(msg, HumanMessage) else "assistant"
+            content = msg.content
+            if content:
+                # 去除紧箍咒显示
+                display_content = content.split('\n今天是')[0]
+                with st.chat_message(role):
+                    st.markdown(display_content)
 
-        # 获取当前索引
-        context = st.session_state.today_context_dic
-        current_indices = [int(k.replace('user_prompt', '')) for k in context.keys() if k.startswith('user_prompt')]
-        new_ind = max(current_indices) + 1 if current_indices else 0
+        # 2. 处理聊天输入与 Agent 执行流
+        if prompt := st.chat_input("有什么我可以帮忙的？"):
+            # 界面展示
+            with st.chat_message("user"):
+                st.markdown(prompt)
 
-        # 【核心修改】后台逻辑：加上格式提醒的“紧箍咒”
-        # 这段话会被存入字典和文件，也会发给 LLM，但刚才已经在界面上展示了简洁版
-        augmented_prompt = prompt
-        if any(i in prompt for i in ['日志', '计划', '日程', '安排', '规划', '任务']):
-            augmented_prompt = prompt + f'\n今天是{now_display.strftime("%Y-%m-%d")}回忆我们一开始对你的输出要求，严格按照[临期任务]、[学业任务]、[实习任务]、[习惯养成]、[聊天]五个部分回复。'
+            # 加上紧箍咒
+            augmented_prompt = prompt
+            if any(i in prompt for i in ['日志', '计划', '日程', '安排', '规划', '任务']):
+                augmented_prompt = prompt + f'\n今天是{sec.date}，回忆我们一开始对你的输出要求，严格按照[临期任务]、[学业任务]、[实习任务]、[习惯养成]、[聊天]五个部分回复。'
 
-        st.session_state.today_context_dic[f'user_prompt{new_ind}'] = augmented_prompt
+            history = st.session_state.history
+            history.append(HumanMessage(content=augmented_prompt))
 
-        # 调用 LLM
-        with st.chat_message("assistant"):
-            with st.spinner("Secretary 正在思考..."):
-                try:
-                    # 这里的 history_lst 会包含刚刚存入的 augmented_prompt
-                    history_lst = dic2list(st.session_state.today_context_dic)
+            # 【核心安全机制】快照长度
+            initial_history_len = len(history)
 
-                    # 发送带有“紧箍咒”的 prompt 给大模型
-                    response = st.session_state.secretary.schedule(history_lst, augmented_prompt)
+            with st.chat_message("assistant"):
+                with st.spinner("Secretary 正在思考与执行..."):
+                    try:
+                        # 注入面板数据
+                        df, _ = _get_dashboard_df()
+                        df_md = df.to_markdown()
 
-                    if response is None: response = "模型无响应"
+                        agent_reply = stream_wrapper(sec.model_with_tools, history[:-1] + [
+                            HumanMessage(content=f'<dashboard>{df_md}</dashboard>'), history[-1]])
+                        history.append(agent_reply)
 
-                    st.markdown(response)
-                    st.session_state.today_context_dic[f'agent_reply{new_ind}'] = response
+                        consecutive_tool_errors = 0
 
-                    # 保存文件
-                    with open(st.session_state.today_file_path, 'w', encoding='utf-8') as f:
-                        json5.dump(st.session_state.today_context_dic, f, indent=4, ensure_ascii=False)
-                except Exception as e:
-                    st.error(f"Error: {e}")
+                        # ============ 完美的工具调用循环 ============
+                        while agent_reply.tool_calls:
+                            for call in agent_reply.tool_calls:
+                                call_id = call.get('id')
+                                call_name = call.get('name')
+                                call_args = call.get('args')
+
+                                try:
+                                    if call_name == 'get_former_logs':
+                                        call_args['chat_logs_dir'] = str(sec.chat_logs_dir)
+                                        result = get_former_logs.invoke(call_args)
+                                    elif call_name in tool_dic:
+                                        result = tool_dic[call_name].invoke(call_args)
+                                    else:
+                                        raise ValueError(f"不存在的工具: {call_name}")
+
+                                    consecutive_tool_errors = 0
+                                except Exception as tool_e:
+                                    consecutive_tool_errors += 1
+                                    if consecutive_tool_errors <= sec.max_retry:
+                                        result = f"工具执行失败，请检查参数后重试: {tool_e}"
+                                    else:
+                                        result = f"FATAL ERROR: 工具连续失败 {sec.max_retry} 次！请立即停止调用工具，并向用户道歉和汇报错误：{tool_e}"
+
+                                tool_msg = ToolMessage(content=str(result), tool_call_id=call_id)
+                                history.append(tool_msg)
+
+                            # 获取执行工具后的最新面板并塞入提示词继续推理
+                            df, _ = _get_dashboard_df()
+                            df_md = df.to_markdown()
+                            agent_reply = stream_wrapper(sec.model_with_tools, history[:-1] + [
+                                HumanMessage(content=f'<dashboard>{df_md}</dashboard>'), history[-1]])
+                            history.append(agent_reply)
+
+                        st.markdown(agent_reply.content)
+
+                        # 保存对话并刷新界面
+                        with open(today_file_path, 'w', encoding='utf-8') as f:
+                            f.write(langchain_core.load.dumps(history, pretty=True, ensure_ascii=False))
+
+                        st.session_state.history = history
+                        st.rerun()
+
+                    except Exception as e:
+                        st.error("与大模型交互时发生异常（网络或API报错），已取消本次操作，请重试。")
+                        # 【回滚机制触发】
+                        st.session_state.history = history[:initial_history_len]
+
+    # ---------------- 右侧栏：计划面板区 ----------------
+    with right_col:
+        st.subheader("📋 实时计划面板")
+        df, _ = _get_dashboard_df()
+
+        if not df.empty:
+            df.fillna('', inplace=True)
+            df['deadline_dt'] = pd.to_datetime(df['deadline'], format="%Y_%m_%d %H_%M", errors='coerce')
+            df = df.sort_values(by=['deadline_dt'], na_position='last')
+
+            aspect_mapping = {
+                'urgent': '🚨 临期任务 (Urgent)',
+                'academic': '📚 学业任务 (Academic)',
+                'internship': '💼 实习任务 (Internship)',
+                'everyday': '🔄 日常习惯 (Everyday)'
+            }
+
+            for aspect_key, title in aspect_mapping.items():
+                aspect_df = df[df['aspect'] == aspect_key]
+                if not aspect_df.empty:
+                    st.markdown(f"#### {title}")
+                    for _, row in aspect_df.iterrows():
+                        with st.container(border=True):
+                            dl_str = row['deadline'] if str(row['deadline']).strip() else "无明确截止"
+                            st.markdown(f"**{row['task']}**")
+                            st.caption(f"⏳ `{dl_str}`")
+                            if row['description']:
+                                st.markdown(f"<small style='color: gray;'>{row['description']}</small>",
+                                            unsafe_allow_html=True)
+        else:
+            st.info("面板干干净净！告诉左侧的秘书帮你添加任务吧。")
 
 else:
     # 历史查看模式
+    st.title("🗄️ 档案查阅")
     if selected_content:
-        st.info(f"正在查看：{view_mode}")
+        st.info(f"当前视图：{view_mode}")
         st.markdown(selected_content)
     else:
         st.write("👈 请在左侧侧边栏选择要查看的文件")

@@ -1,12 +1,16 @@
+#models.py
 import datetime
 import langchain_core.load
 from langchain_openai import ChatOpenAI
 from langchain_core.tools import tool, InjectedToolArg
 from src.get_env import config
-from typing import Annotated, List
+from typing import Annotated, List, Literal, Optional
 from pathlib import Path
 from langchain_core.messages import BaseMessage, BaseMessageChunk
 import json5
+import pandas as pd
+from ..utils.logger import logger
+import re
 
 base_model = ChatOpenAI(
     base_url=config.LLM_API_URL,
@@ -112,10 +116,10 @@ def stream_wrapper(model, input_prompts, log_folder: Path = Path("logs_thinking"
 @tool()
 def get_time() -> str:
     """
-    可以获取当前的时间，格式为"%Y_%m_%d %H_%M_%S"
+    可以获取当前的星期和时间信息，格式为"%A %Y_%m_%d %H_%M_%S"
     :return:格式为"%Y_%m_%d %H_%M_%S"的当前时间
     """
-    return datetime.datetime.now().strftime("%Y_%m_%d %H_%M_%S")
+    return datetime.datetime.now().strftime("%A %Y_%m_%d %H_%M_%S")
 
 
 @tool()
@@ -157,6 +161,127 @@ def get_former_logs(
 
         return "\n".join(result_list)
     else:
-        return "没有当天的计划日志文件，这可能说明当天没有进行工作"
+        return "没有当天的计划日志文件，这说明当天没有进行工作"
 
 
+# 这个东西真的非常非常适合做成数据库，这是下一步的优化方向之一
+def _get_dashboard_df() -> tuple[pd.DataFrame, Path]:
+    """
+    通用内部函数：负责定位文件夹、加载当天的面板，或从过去的面板继承，或初始化新面板。
+    返回当前的 DataFrame 和当天应该保存的 Path。
+    """
+    dashboard_dir_path = Path(__file__).parent.parent / 'dashboards'
+    dashboard_dir_path.mkdir(parents=True, exist_ok=True)
+    file_name = f"dashboard_{datetime.datetime.now().strftime('%Y_%m_%d')}.csv"
+    dashboard_path = dashboard_dir_path / file_name
+
+    # 1. 如果当天文件已存在，直接读取
+    if dashboard_path.exists():
+        return pd.read_csv(dashboard_path), dashboard_path
+
+    # 2. 如果当天不存在，尝试寻找过去的面板继承
+    pattern = r"\d{4}_\d{2}_\d{2}"
+    valid_df_dates = []
+    # 稍微严谨点，只找 csv 文件
+    for file in dashboard_dir_path.glob('*.csv'):
+        matches = re.findall(pattern, file.stem)
+        if matches:
+            valid_df_dates.append(datetime.datetime.strptime(matches[0], "%Y_%m_%d"))
+
+    if valid_df_dates:
+        valid_df_dates.sort()
+        latest_file_name = f'dashboard_{valid_df_dates[-1].strftime("%Y_%m_%d")}.csv'
+        inherent_df_path = dashboard_dir_path / latest_file_name
+        return pd.read_csv(inherent_df_path), dashboard_path
+
+    # 3. 如果什么都没找到，返回一个全新带表头的空 DF
+    empty_df = pd.DataFrame(columns=['aspect', 'deadline', 'task', 'description'])
+    return empty_df, dashboard_path
+
+
+@tool()
+def add_dashboard(
+        aspect: Annotated[Literal["urgent", "academic", "internship", "everyday"], "任务类型"],
+        deadline: Annotated[str, "截止时间，格式'%Y_%m_%d %H_%M'。everyday任务填''"],
+        task: Annotated[str, "任务的简洁名称"],
+        description: Annotated[str, "任务详细信息"]
+):
+    """
+    当用户透露他增加了新任务时，调用此函数向<dashboards>增加条目。一次只能操作一个。
+    """
+    try:
+        cur_df, dashboard_path = _get_dashboard_df()
+
+        # 检查是否已经存在同名任务，防止重复添加
+        if task in cur_df['task'].values:
+            return f"添加失败：面板中已存在名为 '{task}' 的任务。如果需要修改请调用 update_dashboard。"
+
+        new_row_df = pd.DataFrame([{
+            'aspect': aspect,
+            'deadline': deadline,
+            'task': task,
+            'description': description
+        }])
+
+        result_df = pd.concat([cur_df, new_row_df], ignore_index=True)
+        result_df.to_csv(dashboard_path, index=False)
+        return f"任务 '{task}' 已成功增添至面板。"
+    except Exception as e:
+        logger.error(f'add_dashboard 失败：\n{e}')
+        return f'工具调用失败，报错信息：{e}'
+
+
+@tool()
+def remove_dashboard(
+        task: Annotated[str, "你想要删除的任务的任务名称"]
+):
+    """
+    当用户任务已完成或不再需要时调用，从<dashboards>中删除该任务。一次只能操作一个。
+    """
+    try:
+        cur_df, dashboard_path = _get_dashboard_df()
+
+        # 必须检查任务是否存在！
+        if task not in cur_df['task'].values:
+            return f"删除失败：未找到名为 '{task}' 的任务，请检查任务名称是否拼写正确。"
+
+        idx = cur_df[cur_df['task'] == task].index
+        result_df = cur_df.drop(idx)
+
+        result_df.to_csv(dashboard_path, index=False)
+        return f"任务 '{task}' 已成功从面板中删除。"
+    except Exception as e:
+        logger.error(f'remove_dashboard 失败：\n{e}')
+        return f'工具调用失败，报错信息：{e}'
+
+
+@tool()
+def update_dashboard(
+        task: Annotated[str, "需要更新信息的任务的名称"],
+        aspect: Annotated[Optional[Literal["urgent", "academic", "internship", "everyday"]], "可选，更新后的任务类型"] = None,
+        deadline: Annotated[Optional[str], "可选，更新后的截止时间"] = None,
+        description: Annotated[Optional[str], "可选，更新后的详细信息"] = None
+):
+    """
+    当用户任务信息发生变化时调用，更新<dashboards>中的特定字段。一次只能操作一个。
+    """
+    try:
+        cur_df, dashboard_path = _get_dashboard_df()
+
+        # 必须检查任务是否存在！
+        if task not in cur_df['task'].values:
+            return f"更新失败：未找到名为 '{task}' 的任务，请检查任务名称是否拼写准确。"
+
+        # 使用 .loc 进行安全的字段更新
+        if aspect:
+            cur_df.loc[cur_df['task'] == task, 'aspect'] = aspect
+        if deadline:
+            cur_df.loc[cur_df['task'] == task, 'deadline'] = deadline
+        if description:
+            cur_df.loc[cur_df['task'] == task, 'description'] = description
+
+        cur_df.to_csv(dashboard_path, index=False)
+        return f"任务 '{task}' 的信息已成功更新。"
+    except Exception as e:
+        logger.error(f'update_dashboard 失败：\n{e}')
+        return f'工具调用失败，报错信息：{e}'
