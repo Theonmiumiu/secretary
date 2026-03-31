@@ -23,6 +23,17 @@ base_model = ChatOpenAI(
     frequency_penalty=config.FREQUENCY_PENALTY
 )
 
+review_model = ChatOpenAI(
+    base_url=config.LLM_API_URL,
+    api_key=config.LLM_API_KEY,
+    model=config.REVIEW_MODEL,
+    max_tokens=config.MAX_TOKENS,
+    max_retries=config.MAX_RETRY,
+    temperature=config.TEMPERATURE,
+    top_p=config.TOP_P,
+    frequency_penalty=config.FREQUENCY_PENALTY
+)
+
 # 打印上下文和思考信息的包装器
 def stream_wrapper(model, input_prompts, log_folder: Path = Path("logs_thinking")):
     """
@@ -116,8 +127,9 @@ def stream_wrapper(model, input_prompts, log_folder: Path = Path("logs_thinking"
 @tool()
 def get_time() -> str:
     """
+    时间确认工具
     可以获取当前的星期和时间信息，格式为"%A %Y_%m_%d %H_%M_%S"
-    :return:格式为"%Y_%m_%d %H_%M_%S"的当前时间
+    :return:格式为"%A %Y_%m_%d %H_%M_%S"的当前时间
     """
     return datetime.datetime.now().strftime("%A %Y_%m_%d %H_%M_%S")
 
@@ -128,6 +140,7 @@ def get_date_delta(
         former_date: Annotated[str, "基准日期之前的某天的日期字符串，应该是'%Y_%m_%d'的格式"]
 ) -> int:
     """
+    时间确认工具
     可以获取基准日和之前某一天之间相差的具体自然天数
     :return: 返回整数，代表相差多少天
     """
@@ -144,13 +157,16 @@ def get_former_logs(
         delta: Annotated[int, "需要几天前的计划日志就填写几"]
 ) -> str:
     """
+    时间确认工具
     用于获取基准日date前delta天的全天计划日志，以及Theon与你的对话，包含了任务完成、调整、取消等细节信息
     :return: 基准日date前delta天的详细计划日志
     """
+    logger.info(f'get_former_logs 被调用：获取 {delta} 天前的日志 (基准日期：{date})')
     former_date = datetime.datetime.strptime(date, '%Y_%m_%d') - datetime.timedelta(delta)
     if not isinstance(chat_logs_dir, Path):
         chat_logs_dir = Path(chat_logs_dir)
     log_path = chat_logs_dir / f"context_{former_date.strftime('%Y_%m_%d')}.json"
+    logger.debug(f'尝试读取日志文件：{log_path}')
     if log_path.exists():
         with open(log_path, 'r', encoding='utf-8') as f:
             history_str = f.read()
@@ -158,9 +174,10 @@ def get_former_logs(
         result_list = []
         for i in history:
             result_list.append(f"{i.type}:\n{i.content}\n")
-
+        logger.info(f'成功获取 {delta} 天前的日志，共 {len(history)} 条消息')
         return "\n".join(result_list)
     else:
+        logger.warning(f'日志文件不存在：{log_path} (说明当天没有进行工作)')
         return "没有当天的计划日志文件，这说明当天没有进行工作"
 
 
@@ -170,6 +187,7 @@ def _get_dashboard_df() -> tuple[pd.DataFrame, Path]:
     通用内部函数：负责定位文件夹、加载当天的面板，或从过去的面板继承，或初始化新面板。
     返回当前的 DataFrame 和当天应该保存的 Path。
     """
+    logger.debug('正在加载任务计划面板...')
     dashboard_dir_path = Path(__file__).parent.parent / 'dashboards'
     dashboard_dir_path.mkdir(parents=True, exist_ok=True)
     file_name = f"dashboard_{datetime.datetime.now().strftime('%Y_%m_%d')}.csv"
@@ -177,6 +195,7 @@ def _get_dashboard_df() -> tuple[pd.DataFrame, Path]:
 
     # 1. 如果当天文件已存在，直接读取
     if dashboard_path.exists():
+        logger.debug(f'加载当天面板文件：{dashboard_path}')
         return pd.read_csv(dashboard_path), dashboard_path
 
     # 2. 如果当天不存在，尝试寻找过去的面板继承
@@ -192,9 +211,11 @@ def _get_dashboard_df() -> tuple[pd.DataFrame, Path]:
         valid_df_dates.sort()
         latest_file_name = f'dashboard_{valid_df_dates[-1].strftime("%Y_%m_%d")}.csv'
         inherent_df_path = dashboard_dir_path / latest_file_name
+        logger.info(f'当天无面板，继承最近面板：{latest_file_name}')
         return pd.read_csv(inherent_df_path), dashboard_path
 
     # 3. 如果什么都没找到，返回一个全新带表头的空 DF
+    logger.info('未找到任何历史面板，创建新面板')
     empty_df = pd.DataFrame(columns=['aspect', 'deadline', 'task', 'description'])
     return empty_df, dashboard_path
 
@@ -207,13 +228,16 @@ def add_dashboard(
         description: Annotated[str, "任务详细信息"]
 ):
     """
-    当用户透露他增加了新任务时，调用此函数向<dashboards>增加条目。一次只能操作一个。
+    <dashboard>管理工具
+    当用户透露他增加了新任务时，调用此函数向<dashboards>增加条目。一次只能操作一个任务。
     """
+    logger.info(f'add_dashboard 被调用：添加任务 "{task}" (类型：{aspect})')
     try:
         cur_df, dashboard_path = _get_dashboard_df()
 
         # 检查是否已经存在同名任务，防止重复添加
         if task in cur_df['task'].values:
+            logger.warning(f'添加任务失败：任务 "{task}" 已存在')
             return f"添加失败：面板中已存在名为 '{task}' 的任务。如果需要修改请调用 update_dashboard。"
 
         new_row_df = pd.DataFrame([{
@@ -224,8 +248,9 @@ def add_dashboard(
         }])
 
         result_df = pd.concat([cur_df, new_row_df], ignore_index=True)
-        result_df.to_csv(dashboard_path, index=False)
-        return f"任务 '{task}' 已成功增添至面板。"
+        result_df.to_csv(dashboard_path, index=False, encoding = 'utf-8')
+        logger.info(f'任务 "{task}" 添加成功，已保存至 {dashboard_path}')
+        return f"任务 '{task}' 已成功增添至面板。现在和Theon聊聊天吧"
     except Exception as e:
         logger.error(f'add_dashboard 失败：\n{e}')
         return f'工具调用失败，报错信息：{e}'
@@ -236,20 +261,24 @@ def remove_dashboard(
         task: Annotated[str, "你想要删除的任务的任务名称"]
 ):
     """
-    当用户任务已完成或不再需要时调用，从<dashboards>中删除该任务。一次只能操作一个。
+    <dashboard>管理工具
+    当用户任务已完成或不再需要完成时调用，从<dashboards>中删除该任务。一次只能操作一个任务。
     """
+    logger.info(f'remove_dashboard 被调用：删除任务 "{task}"')
     try:
         cur_df, dashboard_path = _get_dashboard_df()
 
         # 必须检查任务是否存在！
         if task not in cur_df['task'].values:
+            logger.warning(f'删除任务失败：未找到任务 "{task}"')
             return f"删除失败：未找到名为 '{task}' 的任务，请检查任务名称是否拼写正确。"
 
         idx = cur_df[cur_df['task'] == task].index
         result_df = cur_df.drop(idx)
 
-        result_df.to_csv(dashboard_path, index=False)
-        return f"任务 '{task}' 已成功从面板中删除。"
+        result_df.to_csv(dashboard_path, encoding = 'utf-8',index=False)
+        logger.info(f'任务 "{task}" 删除成功，已保存至 {dashboard_path}')
+        return f"任务 '{task}' 已成功从面板中删除。现在和Theon聊聊天吧"
     except Exception as e:
         logger.error(f'remove_dashboard 失败：\n{e}')
         return f'工具调用失败，报错信息：{e}'
@@ -263,13 +292,20 @@ def update_dashboard(
         description: Annotated[Optional[str], "可选，更新后的详细信息"] = None
 ):
     """
-    当用户任务信息发生变化时调用，更新<dashboards>中的特定字段。一次只能操作一个。
+    <dashboard>管理工具
+    当用户任务信息发生变化时调用，更新<dashboards>中的特定字段。一次只能操作一个任务。
     """
+    update_fields = []
+    if aspect: update_fields.append(f"aspect={aspect}")
+    if deadline: update_fields.append(f"deadline={deadline}")
+    if description: update_fields.append(f"description={description}")
+    logger.info(f'update_dashboard 被调用：更新任务 "{task}" 的字段 [{", ".join(update_fields)}]')
     try:
         cur_df, dashboard_path = _get_dashboard_df()
 
         # 必须检查任务是否存在！
         if task not in cur_df['task'].values:
+            logger.warning(f'更新任务失败：未找到任务 "{task}"')
             return f"更新失败：未找到名为 '{task}' 的任务，请检查任务名称是否拼写准确。"
 
         # 使用 .loc 进行安全的字段更新
@@ -280,8 +316,9 @@ def update_dashboard(
         if description:
             cur_df.loc[cur_df['task'] == task, 'description'] = description
 
-        cur_df.to_csv(dashboard_path, index=False)
-        return f"任务 '{task}' 的信息已成功更新。"
+        cur_df.to_csv(dashboard_path, encoding='utf-8', index=False)
+        logger.info(f'任务 "{task}" 更新成功，已保存至 {dashboard_path}')
+        return f"任务 '{task}' 的信息已成功更新。现在和Theon聊聊天吧"
     except Exception as e:
         logger.error(f'update_dashboard 失败：\n{e}')
         return f'工具调用失败，报错信息：{e}'

@@ -3,7 +3,7 @@ from pathlib import Path
 import datetime
 import langchain_core.load
 import pandas as pd
-from src.LLMs.models import base_model, get_former_logs, get_date_delta, get_time, update_dashboard, add_dashboard, remove_dashboard, stream_wrapper, _get_dashboard_df
+from src.LLMs.models import base_model, review_model, get_former_logs, get_date_delta, get_time, update_dashboard, add_dashboard, remove_dashboard, stream_wrapper, _get_dashboard_df
 from langchain_openai import ChatOpenAI
 from src.LLMs.prompts import record_system_prompt, report_system_prompt, conclude_system_prompt
 from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
@@ -43,6 +43,7 @@ langchain_openai_base._convert_delta_to_message_chunk = _patched_convert_delta_t
 class Secretary:
     def __init__(self,
                  model: ChatOpenAI = base_model,
+                 review_model: ChatOpenAI = review_model,
                  model_with_tools: ChatOpenAI = base_model.bind_tools([get_former_logs, get_date_delta, get_time, update_dashboard, add_dashboard, remove_dashboard]),
                  chat_logs_dir: Path = Path(__file__).parent / "src" / "chat_logs",
                  dashboard_dir: Path = Path(__file__).parent / "src" / "dashboards",
@@ -56,6 +57,7 @@ class Secretary:
         self.dashboards_dir: Path = dashboard_dir
         self.weekly_reports_dir: Path = weekly_reports_dir
         self.model = model
+        self.review_model = review_model
         self.model_with_tools = model_with_tools
         self.chat_logs_dir.mkdir(parents=True, exist_ok=True)
         self.weekly_reports_dir.mkdir(parents=True, exist_ok=True)
@@ -235,11 +237,13 @@ class Secretary:
                     logger.info(f'模型获取工具结果，继续思考中...')
                     agent_reply = stream_wrapper(
                         self.model_with_tools,
-                        history[:-1] + [HumanMessage(f'<dashboard>{df_md}</dashboard>'),history[-1]]
+                        history + [HumanMessage(f'<dashboard>{df_md}</dashboard>')]
                     )
                     history.append(agent_reply)
 
                 print(f"\n\n{agent_reply.content}\n\n")
+                # chat = stream_wrapper(base_model, history + [HumanMessage(f'请检查你的工作是否完成，另外也别光顾着工作，别忘了跟我聊天，给我点反馈')])
+                # history.append(chat)
                 # 写入文件
                 with open(today_file_path, 'w', encoding='utf-8') as f:
                     history_str = langchain_core.load.dumps(history, pretty=True, ensure_ascii=False)
